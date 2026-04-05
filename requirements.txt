@@ -1,0 +1,8 @@
+python-telegram-bot==21.10  # Telegram Bot API wrapper (includes httpx for HTTP)
+python-dotenv==1.1.0       # Loads .env file into environment variables
+Flask==3.1.0               # Web framework — handles webhook HTTP requests from Telegram
+gunicorn==23.0.0           # Production WSGI server — runs Flask on Render
+requests==2.32.3           # HTTP client — used to register the webhook URL with Telegram
+psycopg2-binary==2.9.10    # PostgreSQL driver — connects to Supabase in production
+                           # "binary" version bundles the C library so no system deps needed
+                           # Only used when DATABASE_URL is set; ignored in local SQLite mode

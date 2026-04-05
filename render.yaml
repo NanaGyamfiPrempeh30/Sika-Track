@@ -1,0 +1,40 @@
+# =============================================================================
+# render.yaml — Render Blueprint for Sika Track
+# =============================================================================
+# This file tells Render how to deploy our bot automatically.
+#
+# IMPORTANT DECISION: We use a "web service" (type: web), NOT a "worker".
+# Why? Render's free tier only includes web services. Workers require a paid
+# plan ($7/month minimum). Since we're converting the bot to webhook mode,
+# Telegram will send HTTP requests TO our server — making it a true web service.
+#
+# CAVEAT: Render free web services "spin down" after 15 minutes of no inbound
+# HTTP traffic. When a new message arrives, the bot takes ~30 seconds to
+# cold-start. For a bookkeeping bot this is acceptable — users won't notice
+# because they aren't expecting instant responses like in a group chat.
+# =============================================================================
+
+services:
+  - type: web                          # Free tier only supports web services
+    name: sika-track                   # Name shown in Render dashboard
+    runtime: docker                    # We're using our Dockerfile to build
+    repo: https://github.com/YOUR_GITHUB_USERNAME/sika-track  # CHANGE THIS to your repo URL
+    plan: free                         # Free tier — $0/month
+    branch: main                       # Deploy from main branch
+    healthCheckPath: /health           # Render pings this to check if the app is alive
+    envVars:
+      # Your Telegram bot token from @BotFather
+      # Set this in the Render dashboard, NOT here (never commit secrets)
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false                    # "sync: false" means set it manually in dashboard
+
+      # The public URL where Telegram sends webhook updates
+      # Render provides this automatically — format: https://sika-track.onrender.com
+      # You'll set this after the first deploy when you know the URL
+      - key: WEBHOOK_URL
+        sync: false                    # Set manually after first deploy
+
+      # PostgreSQL connection string from Supabase (free tier)
+      # Format: postgresql://user:password@host:port/database
+      - key: DATABASE_URL
+        sync: false                    # Set manually — contains credentials

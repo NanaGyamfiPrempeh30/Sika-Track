@@ -1,0 +1,19 @@
+# Environment variables (contains secrets like bot token)
+.env
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# SQLite database files (generated at runtime)
+data/*.db
+
+# Virtual environment folder
+venv/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Claude Code settings
+.claude/
