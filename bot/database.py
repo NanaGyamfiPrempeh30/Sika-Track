@@ -72,6 +72,7 @@ if DATABASE_URL:
 
         Uses PostgreSQL's ON CONFLICT ... DO UPDATE (same as SQLite UPSERT).
         """
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
@@ -85,6 +86,7 @@ if DATABASE_URL:
 
     def add_transaction(chat_id, txn_type, amount, category):
         """Record a sale or expense in PostgreSQL."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
@@ -102,6 +104,7 @@ if DATABASE_URL:
         Uses CURRENT_DATE which respects the database timezone setting.
         Supabase defaults to UTC — same as SQLite's date('now').
         """
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dicts
         cur.execute(
@@ -116,6 +119,7 @@ if DATABASE_URL:
 
     def get_week(chat_id):
         """Get all transactions from the last 7 days for a user (PostgreSQL version)."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dicts
         cur.execute(
@@ -167,6 +171,7 @@ else:
 
     def ensure_user(chat_id, name=""):
         """Add user to DB if they don't exist. Update name if they do."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         conn.execute(
             "INSERT INTO users (chat_id, name) VALUES (?, ?) "
@@ -178,6 +183,7 @@ else:
 
     def add_transaction(chat_id, txn_type, amount, category):
         """Record a sale or expense."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         conn.execute(
             "INSERT INTO transactions (chat_id, type, amount, category) VALUES (?, ?, ?, ?)",
@@ -188,6 +194,7 @@ else:
 
     def get_today(chat_id):
         """Get all of today's transactions for a user."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         rows = conn.execute(
             "SELECT type, amount, category FROM transactions "
@@ -199,6 +206,7 @@ else:
 
     def get_week(chat_id):
         """Get all transactions from the last 7 days for a user."""
+        _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         rows = conn.execute(
             "SELECT type, amount, category FROM transactions "
@@ -210,6 +218,26 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Create tables when this module is first imported (works for both databases)
+# Initialize tables lazily — NOT at import time.
+# Why? On Render, the database might not be reachable yet when gunicorn first
+# loads the module. If init_db() fails at import time, the entire app crashes
+# and gunicorn refuses to boot. Instead, we try on first use.
 # ---------------------------------------------------------------------------
-init_db()
+_db_initialized = False  # Track whether tables have been created
+
+
+def _ensure_initialized():
+    """Create tables if we haven't already. Called before every DB operation.
+
+    This is safe to call repeatedly — after the first success, it's a no-op.
+    If the database is temporarily unreachable, it retries on the next call.
+    """
+    global _db_initialized
+    if not _db_initialized:
+        try:
+            init_db()
+            _db_initialized = True  # Don't try again — tables exist
+        except Exception as e:
+            # Log the error but don't crash the app — retry next time
+            import logging
+            logging.getLogger(__name__).warning("init_db failed (will retry): %s", e)
