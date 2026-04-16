@@ -132,6 +132,79 @@ if DATABASE_URL:
         conn.close()
         return rows
 
+    def get_date_range(chat_id, start_date, end_date):
+        """Get transactions between start_date and end_date inclusive (PostgreSQL).
+
+        Used by all summary commands (today, yesterday, week, month, specific dates).
+        Casts created_at to date for clean day-boundary comparisons.
+
+        Args:
+            chat_id: user's Telegram chat ID
+            start_date: datetime.date — start of range (inclusive)
+            end_date: datetime.date — end of range (inclusive)
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dicts
+        cur.execute(
+            "SELECT type, amount, category FROM transactions "
+            "WHERE chat_id = %s AND created_at::date >= %s AND created_at::date <= %s",
+            (chat_id, start_date, end_date),  # psycopg2 handles date objects natively
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+
+    def get_last_transaction(chat_id):
+        """Get the most recent transaction for a user, or None (PostgreSQL).
+
+        Returns dict with: id, type, amount, category, created_at.
+        Used by the undo command to preview and then delete the last entry.
+        Orders by created_at DESC, id DESC to break ties deterministically.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dict
+        cur.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions "
+            "WHERE chat_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            (chat_id,),  # Only this user's transactions
+        )
+        row = cur.fetchone()  # Single row or None if no transactions
+        cur.close()
+        conn.close()
+        return row
+
+    def delete_transaction(txn_id):
+        """Delete a single transaction by its ID (PostgreSQL).
+
+        Used by the undo confirmation to remove only the last entry.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM transactions WHERE id = %s", (txn_id,))
+        conn.commit()  # Persist the deletion
+        cur.close()
+        conn.close()
+
+    def delete_all_user_data(chat_id):
+        """Delete all transactions and user record for a chat_id (PostgreSQL).
+
+        Called when user confirms 'yes delete' to erase everything.
+        Transactions are deleted first (foreign key constraint requires this),
+        then the user record itself is removed.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM transactions WHERE chat_id = %s", (chat_id,))  # Txns first
+        cur.execute("DELETE FROM users WHERE chat_id = %s", (chat_id,))  # Then user record
+        conn.commit()  # Persist both deletions in one transaction
+        cur.close()
+        conn.close()
+
 else:
     # =======================================================================
     # SQLITE MODE (local development — no setup required)
@@ -215,6 +288,67 @@ else:
         ).fetchall()
         conn.close()
         return rows
+
+    def get_date_range(chat_id, start_date, end_date):
+        """Get transactions between start_date and end_date inclusive (SQLite).
+
+        Used by all summary commands. Converts date objects to ISO strings
+        for comparison with SQLite's date() function.
+
+        Args:
+            chat_id: user's Telegram chat ID
+            start_date: datetime.date — start of range (inclusive)
+            end_date: datetime.date — end of range (inclusive)
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT type, amount, category FROM transactions "
+            "WHERE chat_id = ? AND date(created_at) >= ? AND date(created_at) <= ?",
+            (chat_id, start_date.isoformat(), end_date.isoformat()),  # date → "YYYY-MM-DD"
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def get_last_transaction(chat_id):
+        """Get the most recent transaction for a user, or None (SQLite).
+
+        Returns dict-like sqlite3.Row with: id, type, amount, category, created_at.
+        Used by the undo command to preview and delete the last entry.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions "
+            "WHERE chat_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (chat_id,),  # Only this user's transactions
+        ).fetchone()  # Single row or None
+        conn.close()
+        return row
+
+    def delete_transaction(txn_id):
+        """Delete a single transaction by its ID (SQLite).
+
+        Used by the undo confirmation to remove only the last entry.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        conn.execute("DELETE FROM transactions WHERE id = ?", (txn_id,))
+        conn.commit()  # Persist the deletion
+        conn.close()
+
+    def delete_all_user_data(chat_id):
+        """Delete all transactions and user record for a chat_id (SQLite).
+
+        Called when user confirms 'yes delete' to erase everything.
+        Transactions deleted first (foreign key), then user record.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        conn.execute("DELETE FROM transactions WHERE chat_id = ?", (chat_id,))  # Txns first
+        conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))  # Then user record
+        conn.commit()  # Persist both deletions
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
