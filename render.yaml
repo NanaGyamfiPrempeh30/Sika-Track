@@ -18,7 +18,7 @@ services:
   - type: web                          # Free tier only supports web services
     name: sika-track                   # Name shown in Render dashboard
     runtime: docker                    # We're using our Dockerfile to build
-    repo: https://github.com/YOUR_GITHUB_USERNAME/sika-track  # CHANGE THIS to your repo URL
+    repo: https://github.com/NanaGyamfiPrempeh30/sika-track  # CHANGE THIS to your repo URL
     plan: free                         # Free tier — $0/month
     branch: main                       # Deploy from main branch
     healthCheckPath: /health           # Render pings this to check if the app is alive
