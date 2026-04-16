@@ -68,11 +68,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Called when user sends /start or /help command."""
+    """Called when user sends /start command — shows welcome + privacy notice."""
     chat_id = update.message.chat.id
     first_name = update.message.chat.first_name or ""
-    logger.info("/start or /help from %s (id=%d)", first_name, chat_id)
-    reply = handle_message(chat_id, first_name, "help")  # Treat as help request
+    logger.info("/start from %s (id=%d)", first_name, chat_id)
+    reply = handle_message(chat_id, first_name, "start")  # Welcome with privacy notice
+    await update.message.reply_text(reply)
+
+
+async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called when user sends /help command — shows all available commands."""
+    chat_id = update.message.chat.id
+    first_name = update.message.chat.first_name or ""
+    logger.info("/help from %s (id=%d)", first_name, chat_id)
+    reply = handle_message(chat_id, first_name, "help")  # Full command reference
     await update.message.reply_text(reply)
 
 
@@ -85,8 +94,8 @@ def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Register handlers — order matters, commands checked first
-    app.add_handler(CommandHandler("start", on_start))   # Handle /start
-    app.add_handler(CommandHandler("help", on_start))    # Handle /help
+    app.add_handler(CommandHandler("start", on_start))   # Handle /start — welcome + privacy
+    app.add_handler(CommandHandler("help", on_help))     # Handle /help — command reference
     app.add_handler(MessageHandler(                      # Handle all other text
         filters.TEXT & ~filters.COMMAND, on_message
     ))
