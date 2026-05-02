@@ -32,6 +32,53 @@ def _fmt(d):
     return f"{d.strftime('%A')}, {d.strftime('%B')} {d.day}"
 
 
+def _short_range(start, end):
+    """Format a date range compactly as 'Apr 1 – Apr 16' for category headers."""
+    return f"{start.strftime('%b')} {start.day} – {end.strftime('%b')} {end.day}"
+
+
+def _profit_period_range(period):
+    """Resolve a period keyword to (start, end, possessive_label) for profit queries.
+
+    period: 'today' (or None), 'yesterday', 'this week'/'week', 'this month'/'month'.
+    Returns a label fragment suitable for "{label}'s profit" — e.g. 'Today',
+    'Yesterday', 'This week', 'This month'.
+    """
+    today = date.today()  # Anchor all relative ranges to today's date
+    if period in (None, "today"):  # 'profit' alone defaults to today
+        return today, today, "Today"
+    if period == "yesterday":  # Single-day window: yesterday
+        y = today - timedelta(days=1)
+        return y, y, "Yesterday"
+    if period in ("this week", "week"):  # Monday-to-today window
+        start = today - timedelta(days=today.weekday())  # Monday of current week
+        return start, today, "This week"
+    # 'this month' / 'month' fall through here — calendar month so far
+    start = today.replace(day=1)  # First day of current month
+    return start, today, "This month"
+
+
+def _category_period_range(period):
+    """Resolve a period keyword to (start_date, end_date, label) for category queries.
+
+    period: one of 'today', 'yesterday', 'this week', 'week', 'this month', 'month', or None.
+    None defaults to this month (per spec: 'how much food' → this month).
+    Returns (start, end, human_label_with_range).
+    """
+    today = date.today()  # Anchor all relative ranges to today
+    if period == "today":  # Single-day window: today
+        return today, today, f"Today ({_short_range(today, today)})"
+    if period == "yesterday":  # Single-day window: yesterday
+        y = today - timedelta(days=1)
+        return y, y, f"Yesterday ({_short_range(y, y)})"
+    if period in ("this week", "week"):  # Monday-to-today window
+        start = today - timedelta(days=today.weekday())  # Monday of current week
+        return start, today, f"This week ({_short_range(start, today)})"
+    # Default and 'this month'/'month' both → calendar month so far
+    start = today.replace(day=1)  # First day of current month
+    return start, today, f"This month ({_short_range(start, today)})"
+
+
 def parse_message(text):
     """Turn a chat message into a dict with intent and data.
 
@@ -50,10 +97,12 @@ def parse_message(text):
     text = text.strip().lower()  # Normalize: remove whitespace, lowercase
 
     # --- Confirmation intents — checked first to avoid collisions with other keywords ---
-    if text == "yes delete":  # Confirms full data deletion
+    if text == "yes delete":  # Confirms full data deletion (wipe-all)
         return {"intent": "delete_confirm"}
-    if text == "yes undo":  # Confirms removing last transaction
+    if text == "yes undo":  # Confirms removing last transaction (undo flow)
         return {"intent": "undo_confirm"}
+    if text == "yes":  # Confirms a pending remove-by-number (resolved in handler)
+        return {"intent": "remove_confirm"}
 
     # --- Help and start commands ---
     if text in ("help", "/help"):  # Show command reference
@@ -65,9 +114,50 @@ def parse_message(text):
     if text in ("undo", "delete last", "cancel last", "remove last"):  # Remove last entry
         return {"intent": "undo"}
 
+    # --- List recent transactions (numbered preview for selective deletion) ---
+    if text in ("list", "recent", "transactions"):  # Show last 10 numbered entries
+        return {"intent": "list_transactions"}
+
+    # --- Remove by number: "remove 1", "delete 3" — selects from the recent list ---
+    # Must be a bare integer (no extra words after) so "delete sold ..." won't match.
+    # The handler enforces the 1–10 range and looks up the corresponding transaction.
+    remove_num = re.match(r"^(?:remove|delete)\s+(\d+)$", text)  # Keyword + integer only
+    if remove_num:
+        return {
+            "intent": "remove_by_number",
+            "n": int(remove_num.group(1)),  # 1-based index into the recent list
+        }
+
+    # --- Edit amount by number: "edit 1 to 500" / "change 3 to 250" ---
+    # Resolves the same way as remove: N points into the user's recent-list view.
+    # Amount supports decimals like '12.5'. The handler enforces the 1–10 range.
+    edit_num = re.match(r"^(?:edit|change)\s+(\d+)\s+to\s+(\d+\.?\d*)$", text)
+    if edit_num:
+        return {
+            "intent": "edit_amount",
+            "n": int(edit_num.group(1)),               # 1-based index
+            "new_amount": float(edit_num.group(2)),     # Replacement amount
+        }
+
     # --- Full data deletion (exact match only) ---
     if text == "delete":  # Request to erase all user data
         return {"intent": "delete"}
+
+    # --- Profit query: "profit", "profit yesterday", "profit this week", etc. ---
+    # Period is optional; bare 'profit' defaults to today.
+    profit_match = re.match(
+        r"^profit(?:\s+(today|yesterday|this week|this month|week|month))?$",
+        text,
+    )  # Word 'profit' optionally followed by a known period
+    if profit_match:
+        period = profit_match.group(1)  # None when user typed just 'profit'
+        start, end, label = _profit_period_range(period)  # e.g. (date, date, 'Today')
+        return {
+            "intent": "profit_query",
+            "start": start,                # Date range start (inclusive)
+            "end": end,                    # Date range end (inclusive)
+            "label": label,                # 'Today' / 'Yesterday' / 'This week' / 'This month'
+        }
 
     # --- Summary: exact keyword matches for today ---
     # "today", "summary", "report", "total", "balance", "how much" all show today's summary
@@ -194,6 +284,40 @@ def parse_message(text):
             "intent": "expense",
             "amount": float(expense.group(1)),  # The numeric amount
             "category": expense.group(2).strip() or "general",  # Category or default
+        }
+
+    # --- Category spending queries: "food this month", "how much kenkey this week" ---
+    # Period keywords match the same flexible vocabulary as summaries.
+    # Order: longer phrases ("this week", "this month") before single words ("week", "month")
+    # so the regex engine prefers them.
+    period_pat = r"(today|yesterday|this week|this month|week|month)"  # Recognized periods
+
+    # Form 1: "how much <category> [period]" — period optional, defaults to this month
+    cat_match = re.match(rf"^how much\s+(.+?)(?:\s+{period_pat})?$", text)
+    if cat_match:
+        category = cat_match.group(1).strip()  # The category name
+        period = cat_match.group(2)            # None if user didn't specify
+        start, end, label = _category_period_range(period)  # Resolve to date range
+        return {
+            "intent": "category_query",
+            "category": category,
+            "start": start,
+            "end": end,
+            "label": label,
+        }
+
+    # Form 2: "<category> <period>" — period required to disambiguate from random text
+    cat_match = re.match(rf"^(.+?)\s+{period_pat}$", text)
+    if cat_match:
+        category = cat_match.group(1).strip()  # The category name
+        period = cat_match.group(2)            # Always present in this form
+        start, end, label = _category_period_range(period)  # Resolve to date range
+        return {
+            "intent": "category_query",
+            "category": category,
+            "start": start,
+            "end": end,
+            "label": label,
         }
 
     return {"intent": "unknown"}  # Nothing matched — we don't understand

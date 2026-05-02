@@ -63,6 +63,18 @@ if DATABASE_URL:
             FOREIGN KEY (chat_id) REFERENCES users(chat_id)      -- Link to users table
         )""")
 
+        # Create pending_actions table — persists "remove N" / "edit N to X" between
+        # the preview message and the user's "yes" reply. Stored in the DB (not
+        # process memory) so multiple gunicorn workers can share the state — any
+        # worker that handles "yes" can find the pending row.
+        cur.execute("""CREATE TABLE IF NOT EXISTS pending_actions (
+            chat_id BIGINT PRIMARY KEY,                          -- One pending action per user
+            action TEXT NOT NULL,                                -- 'remove' or 'edit'
+            txn_id INTEGER NOT NULL,                             -- Which transaction
+            new_amount REAL,                                     -- For 'edit' only; NULL for 'remove'
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()    -- When the preview was shown
+        )""")
+
         conn.commit()  # Save the schema changes
         cur.close()
         conn.close()
@@ -176,6 +188,70 @@ if DATABASE_URL:
         conn.close()
         return row
 
+    def get_transaction_by_id(txn_id):
+        """Look up a single transaction row by its primary key (PostgreSQL).
+
+        Used by the targeted-delete confirm step to retrieve the row we
+        previewed earlier so we can report its details after deletion.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions WHERE id = %s",
+            (txn_id,),  # Single-row primary-key lookup
+        )
+        row = cur.fetchone()  # None if the row was already deleted
+        cur.close()
+        conn.close()
+        return row
+
+    def get_recent_transactions(chat_id, limit=10):
+        """Get the N most recent transactions for a user (PostgreSQL).
+
+        Used by the 'list' command to show a numbered preview, and by
+        'remove N' to look up which transaction the user pointed at.
+        Order: newest first, with id as a tiebreaker for deterministic numbering.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dicts
+        cur.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions "
+            "WHERE chat_id = %s ORDER BY created_at DESC, id DESC LIMIT %s",
+            (chat_id, limit),  # Cap at limit rows
+        )
+        rows = cur.fetchall()  # List of recent rows, newest first
+        cur.close()
+        conn.close()
+        return rows
+
+    def get_category_range(chat_id, category, start_date, end_date):
+        """Get transactions for a specific category in a date range (PostgreSQL).
+
+        Used by category spending queries ("food this month", "kenkey this week").
+        Category match is case-insensitive — defensive even though parser lowercases.
+
+        Args:
+            chat_id: user's Telegram chat ID
+            category: category name to filter on (e.g. "food")
+            start_date: datetime.date — start of range (inclusive)
+            end_date: datetime.date — end of range (inclusive)
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dicts
+        cur.execute(
+            "SELECT type, amount, category FROM transactions "
+            "WHERE chat_id = %s AND LOWER(category) = LOWER(%s) "
+            "AND created_at::date >= %s AND created_at::date <= %s",
+            (chat_id, category, start_date, end_date),  # Filter by user/category/date
+        )
+        rows = cur.fetchall()  # All matching rows for aggregation
+        cur.close()
+        conn.close()
+        return rows
+
     def delete_transaction(txn_id):
         """Delete a single transaction by its ID (PostgreSQL).
 
@@ -189,21 +265,112 @@ if DATABASE_URL:
         cur.close()
         conn.close()
 
-    def delete_all_user_data(chat_id):
-        """Delete all transactions and user record for a chat_id (PostgreSQL).
+    def update_transaction_amount(txn_id, new_amount):
+        """Update the amount on a single transaction (PostgreSQL).
 
-        Called when user confirms 'yes delete' to erase everything.
-        Transactions are deleted first (foreign key constraint requires this),
-        then the user record itself is removed.
+        Used by the 'edit N to AMOUNT' flow. Type, category and timestamp
+        are preserved — only the amount changes.
         """
         _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute("DELETE FROM transactions WHERE chat_id = %s", (chat_id,))  # Txns first
-        cur.execute("DELETE FROM users WHERE chat_id = %s", (chat_id,))  # Then user record
-        conn.commit()  # Persist both deletions in one transaction
+        cur.execute(
+            "UPDATE transactions SET amount = %s WHERE id = %s",
+            (new_amount, txn_id),  # Parameterized to prevent injection
+        )
+        conn.commit()  # Persist the change
         cur.close()
         conn.close()
+
+    def get_period_totals(chat_id, start_date, end_date):
+        """Sum sales and expenses over a date range in one round trip (PostgreSQL).
+
+        Returns dict {sales: float, expenses: float, count: int}. Done with
+        SQL aggregation rather than fetching rows so the per-insert running
+        total stays cheap even with lots of transactions.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT "
+            "COALESCE(SUM(CASE WHEN type = 'sale' THEN amount ELSE 0 END), 0), "      # Sales sum
+            "COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0), "    # Expense sum
+            "COUNT(*) "                                                                # Total rows
+            "FROM transactions "
+            "WHERE chat_id = %s AND created_at::date >= %s AND created_at::date <= %s",
+            (chat_id, start_date, end_date),  # Bounded date window
+        )
+        sales_sum, expense_sum, total_count = cur.fetchone()  # Single aggregated row
+        cur.close()
+        conn.close()
+        # Cast to float — psycopg2 may return Decimal; the bot uses floats elsewhere
+        return {
+            "sales": float(sales_sum),
+            "expenses": float(expense_sum),
+            "count": int(total_count),
+        }
+
+    def delete_all_user_data(chat_id):
+        """Delete all transactions, pending actions, and user record (PostgreSQL).
+
+        Called when user confirms 'yes delete' to erase everything.
+        Order: pending_actions and transactions first (no FK to users yet but
+        keeps semantics consistent), then the user record.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM pending_actions WHERE chat_id = %s", (chat_id,))  # Drop pending
+        cur.execute("DELETE FROM transactions WHERE chat_id = %s", (chat_id,))  # Txns next
+        cur.execute("DELETE FROM users WHERE chat_id = %s", (chat_id,))  # Then user record
+        conn.commit()  # Persist all three deletions atomically
+        cur.close()
+        conn.close()
+
+    def set_pending_action(chat_id, action, txn_id, new_amount=None):
+        """Persist a pending 'remove' or 'edit' for this chat (PostgreSQL).
+
+        Replaces any prior pending row — only one action queued at a time per
+        user, mirroring the dict-overwrite semantics the in-memory version had.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO pending_actions (chat_id, action, txn_id, new_amount) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (chat_id) DO UPDATE SET "
+            "action = EXCLUDED.action, "                  # Replace action ('remove' ↔ 'edit')
+            "txn_id = EXCLUDED.txn_id, "                  # Point at the new transaction
+            "new_amount = EXCLUDED.new_amount, "          # NULL for remove, value for edit
+            "created_at = NOW()",                          # Refresh timestamp on overwrite
+            (chat_id, action, txn_id, new_amount),
+        )
+        conn.commit()  # Persist the queued action
+        cur.close()
+        conn.close()
+
+    def pop_pending_action(chat_id):
+        """Atomically read+delete the pending action for a chat (PostgreSQL).
+
+        Returns dict with action/txn_id/new_amount, or None if nothing pending.
+        DELETE...RETURNING guarantees a single round-trip and that two workers
+        racing on the same 'yes' can't both see the row.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dict
+        cur.execute(
+            "DELETE FROM pending_actions WHERE chat_id = %s "
+            "RETURNING action, txn_id, new_amount",
+            (chat_id,),
+        )
+        row = cur.fetchone()  # None if no row was deleted
+        conn.commit()  # Persist the deletion
+        cur.close()
+        conn.close()
+        return row
 
 else:
     # =======================================================================
@@ -238,6 +405,16 @@ else:
             category TEXT DEFAULT 'general',           -- What it was for
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (chat_id) REFERENCES users(chat_id)
+        )""")
+        # Pending actions for the "remove N" / "edit N to X" → "yes" flow.
+        # Persisted so we don't depend on process memory (unused locally,
+        # required in production where multiple gunicorn workers exist).
+        conn.execute("""CREATE TABLE IF NOT EXISTS pending_actions (
+            chat_id INTEGER PRIMARY KEY,               -- One pending action per user
+            action TEXT NOT NULL,                      -- 'remove' or 'edit'
+            txn_id INTEGER NOT NULL,                   -- Which transaction
+            new_amount REAL,                           -- For 'edit' only; NULL for 'remove'
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
         conn.commit()
         conn.close()
@@ -326,6 +503,61 @@ else:
         conn.close()
         return row
 
+    def get_transaction_by_id(txn_id):
+        """Look up a single transaction row by its primary key (SQLite).
+
+        Used by the targeted-delete confirm step to retrieve the row we
+        previewed earlier so we can report its details after deletion.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions WHERE id = ?",
+            (txn_id,),  # Single-row primary-key lookup
+        ).fetchone()  # None if already deleted
+        conn.close()
+        return row
+
+    def get_recent_transactions(chat_id, limit=10):
+        """Get the N most recent transactions for a user (SQLite).
+
+        Used by the 'list' command to show a numbered preview, and by
+        'remove N' to look up which transaction the user pointed at.
+        Order: newest first, with id as a tiebreaker for deterministic numbering.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT id, type, amount, category, created_at FROM transactions "
+            "WHERE chat_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (chat_id, limit),  # Cap at limit rows
+        ).fetchall()
+        conn.close()
+        return rows
+
+    def get_category_range(chat_id, category, start_date, end_date):
+        """Get transactions for a specific category in a date range (SQLite).
+
+        Used by category spending queries ("food this month", "kenkey this week").
+        Category match is case-insensitive via LOWER() comparison.
+
+        Args:
+            chat_id: user's Telegram chat ID
+            category: category name (e.g. "food")
+            start_date: datetime.date — start of range (inclusive)
+            end_date: datetime.date — end of range (inclusive)
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT type, amount, category FROM transactions "
+            "WHERE chat_id = ? AND LOWER(category) = LOWER(?) "
+            "AND date(created_at) >= ? AND date(created_at) <= ?",
+            (chat_id, category, start_date.isoformat(), end_date.isoformat()),  # Filter
+        ).fetchall()
+        conn.close()
+        return rows
+
     def delete_transaction(txn_id):
         """Delete a single transaction by its ID (SQLite).
 
@@ -337,18 +569,99 @@ else:
         conn.commit()  # Persist the deletion
         conn.close()
 
-    def delete_all_user_data(chat_id):
-        """Delete all transactions and user record for a chat_id (SQLite).
+    def update_transaction_amount(txn_id, new_amount):
+        """Update the amount on a single transaction (SQLite).
 
-        Called when user confirms 'yes delete' to erase everything.
-        Transactions deleted first (foreign key), then user record.
+        Used by the 'edit N to AMOUNT' flow. Type, category and timestamp
+        are preserved — only the amount changes.
         """
         _ensure_initialized()  # Create tables if first call
         conn = get_connection()
-        conn.execute("DELETE FROM transactions WHERE chat_id = ?", (chat_id,))  # Txns first
-        conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))  # Then user record
-        conn.commit()  # Persist both deletions
+        conn.execute(
+            "UPDATE transactions SET amount = ? WHERE id = ?",
+            (new_amount, txn_id),  # Parameterized to prevent injection
+        )
+        conn.commit()  # Persist the change
         conn.close()
+
+    def get_period_totals(chat_id, start_date, end_date):
+        """Sum sales and expenses over a date range in one round trip (SQLite).
+
+        Returns dict {sales: float, expenses: float, count: int}. Done with
+        SQL aggregation rather than fetching rows so the per-insert running
+        total stays cheap even with lots of transactions.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT "
+            "COALESCE(SUM(CASE WHEN type = 'sale' THEN amount ELSE 0 END), 0), "      # Sales sum
+            "COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0), "    # Expense sum
+            "COUNT(*) "                                                                # Total rows
+            "FROM transactions "
+            "WHERE chat_id = ? AND date(created_at) >= ? AND date(created_at) <= ?",
+            (chat_id, start_date.isoformat(), end_date.isoformat()),  # Bounded window
+        ).fetchone()
+        conn.close()
+        # SQLite returns native Python numbers; tuple-index since this is plain Row
+        return {
+            "sales": float(row[0]),
+            "expenses": float(row[1]),
+            "count": int(row[2]),
+        }
+
+    def delete_all_user_data(chat_id):
+        """Delete all transactions, pending actions, and user record (SQLite).
+
+        Called when user confirms 'yes delete' to erase everything.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        conn.execute("DELETE FROM pending_actions WHERE chat_id = ?", (chat_id,))  # Drop pending
+        conn.execute("DELETE FROM transactions WHERE chat_id = ?", (chat_id,))  # Txns next
+        conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))  # Then user record
+        conn.commit()  # Persist all three deletions
+        conn.close()
+
+    def set_pending_action(chat_id, action, txn_id, new_amount=None):
+        """Persist a pending 'remove' or 'edit' for this chat (SQLite).
+
+        UPSERT replaces any prior pending row — one queued action per user.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        conn.execute(
+            "INSERT INTO pending_actions (chat_id, action, txn_id, new_amount) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "action = excluded.action, "                  # Replace action
+            "txn_id = excluded.txn_id, "                  # Point at the new txn
+            "new_amount = excluded.new_amount, "          # NULL for remove, value for edit
+            "created_at = CURRENT_TIMESTAMP",              # Refresh timestamp
+            (chat_id, action, txn_id, new_amount),
+        )
+        conn.commit()  # Persist the queued action
+        conn.close()
+
+    def pop_pending_action(chat_id):
+        """Read and delete the pending action for a chat (SQLite).
+
+        Returns sqlite3.Row with action/txn_id/new_amount, or None.
+        Done in one connection so the read+delete share an implicit
+        transaction — guards against losing a pending row mid-flight.
+        """
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT action, txn_id, new_amount FROM pending_actions "
+            "WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()  # None if nothing pending
+        if row is not None:  # Only delete if we actually found something
+            conn.execute("DELETE FROM pending_actions WHERE chat_id = ?", (chat_id,))
+            conn.commit()  # Persist the deletion
+        conn.close()
+        return row
 
 
 # ---------------------------------------------------------------------------
