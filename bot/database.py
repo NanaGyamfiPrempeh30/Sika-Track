@@ -22,17 +22,74 @@ if DATABASE_URL:
     # We use psycopg2-binary which bundles the C library (no system deps needed).
     import psycopg2                     # PostgreSQL driver
     import psycopg2.extras              # For RealDictCursor (returns rows as dicts)
+    import psycopg2.extensions          # For type adapters and connection status
+    import threading                    # One reusable connection per thread
+    import time                         # Track when the connection was last used
+
+    # Amounts are stored as NUMERIC (exact money). psycopg2 would return them as
+    # Decimal, which can't be mixed with float math elsewhere — convert to float.
+    _DEC2FLOAT = psycopg2.extensions.new_type(
+        psycopg2.extensions.DECIMAL.values, "DEC2FLOAT",
+        lambda value, cur: float(value) if value is not None else None,
+    )
+    psycopg2.extensions.register_type(_DEC2FLOAT)
 
     # Supabase and some providers use "postgres://" but psycopg2 requires "postgresql://"
     # This fixes the URL format if needed
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-    def get_connection():
-        """Open a connection to the PostgreSQL database."""
-        conn = psycopg2.connect(DATABASE_URL)  # Connect using the full URL
-        conn.autocommit = False                # We'll commit manually for safety
+    _local = threading.local()  # Holds this thread's reusable connection
+    _PING_AFTER_IDLE = 60       # Seconds idle before we check the connection is still alive
+
+    class _ReusableConnection:
+        """Wraps the long-lived connection so existing `conn.close()` calls keep it open.
+
+        Opening a new Supabase connection costs several network round trips
+        (TCP + TLS + login). Reusing one makes every reply noticeably faster.
+        """
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)  # cursor(), commit(), ... pass straight through
+
+        def close(self):
+            """Keep the connection open for the next message (reused, not closed)."""
+            _local.last_used = time.monotonic()
+
+    def _connect():
+        """Open a fresh connection with TCP keepalives so dead links are noticed."""
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+        )
+        conn.autocommit = True  # Each statement commits itself; no "idle in transaction"
         return conn
+
+    def get_connection():
+        """Return this thread's PostgreSQL connection, reconnecting if it dropped."""
+        conn = getattr(_local, "conn", None)
+        if conn is not None and not conn.closed:
+            status = conn.info.transaction_status
+            if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                try:  # A previous error left a manual BEGIN open — clear it.
+                    with conn.cursor() as cur:  # (conn.rollback() is a no-op under autocommit)
+                        cur.execute("ROLLBACK")
+                except psycopg2.Error:
+                    conn.close()
+            elif time.monotonic() - getattr(_local, "last_used", 0) > _PING_AFTER_IDLE:
+                try:  # Been idle a while — the server may have dropped us
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                except psycopg2.Error:
+                    conn.close()
+        if conn is None or conn.closed:
+            conn = _connect()
+            _local.conn = conn
+        _local.last_used = time.monotonic()
+        return _ReusableConnection(conn)
 
     def init_db():
         """Create tables if they don't exist yet (PostgreSQL version).
@@ -57,7 +114,7 @@ if DATABASE_URL:
             id SERIAL PRIMARY KEY,                               -- Auto-incrementing ID
             chat_id BIGINT NOT NULL,                             -- Which user owns this
             type TEXT NOT NULL,                                  -- 'sale' or 'expense'
-            amount REAL NOT NULL,                                -- Money amount in GHS
+            amount NUMERIC(12, 2) NOT NULL,                      -- Money amount in GHS (exact)
             category TEXT DEFAULT 'general',                     -- What it was for
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),   -- When it was recorded
             FOREIGN KEY (chat_id) REFERENCES users(chat_id)      -- Link to users table
@@ -71,9 +128,31 @@ if DATABASE_URL:
             chat_id BIGINT PRIMARY KEY,                          -- One pending action per user
             action TEXT NOT NULL,                                -- 'remove' or 'edit'
             txn_id INTEGER NOT NULL,                             -- Which transaction
-            new_amount REAL,                                     -- For 'edit' only; NULL for 'remove'
+            new_amount NUMERIC(12, 2),                           -- For 'edit' only; NULL for 'remove'
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()    -- When the preview was shown
         )""")
+
+        # Upgrade older databases: REAL only keeps ~6 digits (12345.67 → 12345.7),
+        # so switch money columns to exact NUMERIC. Only runs if still REAL.
+        cur.execute("""DO $$ BEGIN
+            IF (SELECT data_type FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'transactions'
+                AND column_name = 'amount') = 'real' THEN
+                ALTER TABLE transactions ALTER COLUMN amount TYPE NUMERIC(12, 2);
+                ALTER TABLE pending_actions ALTER COLUMN new_amount TYPE NUMERIC(12, 2);
+            END IF;
+        END $$""")
+
+        # Speeds up every per-user date query once the table grows
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transactions_chat_created "
+            "ON transactions (chat_id, created_at)"
+        )
+
+        # Evening summary opt-out (on by default; 'summary off' turns it off)
+        cur.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_summary BOOLEAN DEFAULT TRUE"
+        )
 
         conn.commit()  # Save the schema changes
         cur.close()
@@ -103,12 +182,14 @@ if DATABASE_URL:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO transactions (chat_id, type, amount, category) "
-            "VALUES (%s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s) RETURNING created_at",
             (chat_id, txn_type, amount, category),  # Parameterized query
         )
+        created_at = cur.fetchone()[0]  # DB-assigned timestamp, saves a re-read
         conn.commit()
         cur.close()
         conn.close()
+        return created_at
 
     def get_today(chat_id):
         """Get all of today's transactions for a user (PostgreSQL version).
@@ -321,10 +402,11 @@ if DATABASE_URL:
         _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         cur = conn.cursor()
+        cur.execute("BEGIN")  # Autocommit is on — group the three deletes into one transaction
         cur.execute("DELETE FROM pending_actions WHERE chat_id = %s", (chat_id,))  # Drop pending
         cur.execute("DELETE FROM transactions WHERE chat_id = %s", (chat_id,))  # Txns next
         cur.execute("DELETE FROM users WHERE chat_id = %s", (chat_id,))  # Then user record
-        conn.commit()  # Persist all three deletions atomically
+        cur.execute("COMMIT")  # Persist all three deletions atomically
         cur.close()
         conn.close()
 
@@ -363,7 +445,7 @@ if DATABASE_URL:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)  # Return dict
         cur.execute(
             "DELETE FROM pending_actions WHERE chat_id = %s "
-            "RETURNING action, txn_id, new_amount",
+            "RETURNING action, txn_id, new_amount, created_at",
             (chat_id,),
         )
         row = cur.fetchone()  # None if no row was deleted
@@ -371,6 +453,32 @@ if DATABASE_URL:
         cur.close()
         conn.close()
         return row
+
+    def set_daily_summary(chat_id, enabled):
+        """Turn the evening summary on or off for one user (PostgreSQL)."""
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("UPDATE users SET daily_summary = %s WHERE chat_id = %s", (enabled, chat_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def get_daily_summary_recipients(day):
+        """Chat IDs with the evening summary on AND at least one entry on `day` (PostgreSQL)."""
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT u.chat_id FROM users u "
+            "JOIN transactions t ON t.chat_id = u.chat_id "
+            "WHERE COALESCE(u.daily_summary, TRUE) AND DATE(t.created_at) = %s",
+            (day,),
+        )
+        ids = [row[0] for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return ids
 
 else:
     # =======================================================================
@@ -401,7 +509,7 @@ else:
             id INTEGER PRIMARY KEY AUTOINCREMENT,      -- Unique transaction ID
             chat_id INTEGER NOT NULL,                  -- Which user owns this
             type TEXT NOT NULL,                        -- 'sale' or 'expense'
-            amount REAL NOT NULL,                      -- Money amount in GHS
+            amount REAL NOT NULL,                      -- Money amount in GHS (float64 in SQLite)
             category TEXT DEFAULT 'general',           -- What it was for
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (chat_id) REFERENCES users(chat_id)
@@ -416,6 +524,14 @@ else:
             new_amount REAL,                           -- For 'edit' only; NULL for 'remove'
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
+        conn.execute(  # Speeds up per-user date queries
+            "CREATE INDEX IF NOT EXISTS idx_transactions_chat_created "
+            "ON transactions (chat_id, created_at)"
+        )
+        try:  # Evening summary opt-out column — SQLite has no ADD COLUMN IF NOT EXISTS
+            conn.execute("ALTER TABLE users ADD COLUMN daily_summary INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         conn.commit()
         conn.close()
 
@@ -435,12 +551,16 @@ else:
         """Record a sale or expense."""
         _ensure_initialized()  # Create tables if first call
         conn = get_connection()
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO transactions (chat_id, type, amount, category) VALUES (?, ?, ?, ?)",
             (chat_id, txn_type, amount, category),
         )
+        created_at = conn.execute(  # DB-assigned timestamp, returned to save a re-read
+            "SELECT created_at FROM transactions WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()[0]
         conn.commit()
         conn.close()
+        return created_at
 
     def get_today(chat_id):
         """Get all of today's transactions for a user."""
@@ -653,7 +773,7 @@ else:
         _ensure_initialized()  # Create tables if first call
         conn = get_connection()
         row = conn.execute(
-            "SELECT action, txn_id, new_amount FROM pending_actions "
+            "SELECT action, txn_id, new_amount, created_at FROM pending_actions "
             "WHERE chat_id = ?",
             (chat_id,),
         ).fetchone()  # None if nothing pending
@@ -662,6 +782,27 @@ else:
             conn.commit()  # Persist the deletion
         conn.close()
         return row
+
+    def set_daily_summary(chat_id, enabled):
+        """Turn the evening summary on or off for one user (SQLite)."""
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        conn.execute("UPDATE users SET daily_summary = ? WHERE chat_id = ?", (int(enabled), chat_id))
+        conn.commit()
+        conn.close()
+
+    def get_daily_summary_recipients(day):
+        """Chat IDs with the evening summary on AND at least one entry on `day` (SQLite)."""
+        _ensure_initialized()  # Create tables if first call
+        conn = get_connection()
+        rows = conn.execute(
+            "SELECT DISTINCT u.chat_id FROM users u "
+            "JOIN transactions t ON t.chat_id = u.chat_id "
+            "WHERE COALESCE(u.daily_summary, 1) AND DATE(t.created_at) = ?",
+            (day.isoformat(),),
+        ).fetchall()
+        conn.close()
+        return [row[0] for row in rows]
 
 
 # ---------------------------------------------------------------------------

@@ -39,13 +39,42 @@ docker build -t sika-track .
 docker run -p 8000:8000 --env-file .env sika-track
 ```
 
-### 6. Set the Webhook
+### 6. Set the Webhook, Secret and Menu
 
-Tell Telegram where to send updates:
+Generate two random secrets:
 
 ```bash
-curl "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=<YOUR_WEBHOOK_URL>"
+python -c "import secrets; print(secrets.token_urlsafe(32))"   # run twice
 ```
+
+Add them on Render (Environment tab) **and** in your local `.env`:
+
+| Variable | Purpose |
+|----------|---------|
+| `WEBHOOK_SECRET` | Telegram sends it with every update; anything without it is rejected |
+| `CRON_SECRET` | Protects the evening-summary trigger URL |
+
+Redeploy on Render, then run once from your computer:
+
+```bash
+python setup_webhook.py      # Sets webhook + secret + ☰ Menu commands
+```
+
+⚠️ Order matters: set `WEBHOOK_SECRET` on Render first, then run the script.
+If the values don't match, the bot ignores every message.
+
+### 7. Keep It Awake + Evening Summary (free, cron-job.org)
+
+Render's free tier sleeps after 15 minutes, so the first reply can take 30–50s.
+Create two jobs at [cron-job.org](https://cron-job.org):
+
+| Job | URL | Schedule |
+|-----|-----|----------|
+| Keep awake | `https://<your-app>.onrender.com/health` | Every 10 minutes |
+| Evening summary | `https://<your-app>.onrender.com/cron/daily-summary?key=<CRON_SECRET>` | Daily, 19:00 GMT |
+
+The summary only goes to users who logged something that day. Users can send
+`summary off` to stop it.
 
 ## Usage
 
@@ -60,3 +89,5 @@ Send these messages to your bot on Telegram:
 | `today` or `summary` | Shows today's sales, expenses, and profit |
 | `week` | Shows this week's summary |
 | `help` | Shows usage instructions |
+| ➕ Sale / ➖ Expense buttons | Tap, then type `50 kenkey` |
+| `summary off` / `summary on` | Stop or restart the evening summary |
