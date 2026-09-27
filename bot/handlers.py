@@ -97,6 +97,11 @@ def _format_profit_reply(period_label, totals):
         # Spec gives 'today yet' wording; mirror that for other periods too
         word = period_label.lower()  # 'today', 'yesterday', 'this week', 'this month'
         return f"💰 No transactions {word} yet."
+    if totals["sales"] == 0:  # Expenses only — likely forgotten sales, not a real loss
+        return (
+            f"🤔 No sales logged {period_label.lower()}, so no profit to show.\n"
+            f"Expenses: GHS {totals['expenses']:.2f}. Made any sales? Tap ➕ Sale to add them."
+        )
     profit = totals["sales"] - totals["expenses"]  # Net for the window
     if profit < 0:  # Loss state — different emoji and label
         return f"📉 {period_label}'s loss: GHS {abs(profit):.2f}"
