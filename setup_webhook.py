@@ -15,6 +15,7 @@ You only need to run this once. Run it again if you change your Render URL.
 Requirements:
     - TELEGRAM_BOT_TOKEN must be set in your .env file
     - WEBHOOK_URL must be set in your .env file (e.g., https://sika-track.onrender.com)
+    - WEBHOOK_SECRET must be set in your .env file AND on Render (same value)
 """
 import os
 import requests  # HTTP client to call the Telegram API
@@ -25,6 +26,7 @@ load_dotenv()  # Read .env file
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Your bot token
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # Your Render URL (e.g., https://sika-track.onrender.com)
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # Must match WEBHOOK_SECRET on Render
 
 if not TOKEN:
     print("ERROR: Set TELEGRAM_BOT_TOKEN in your .env file")
@@ -35,6 +37,11 @@ if not WEBHOOK_URL:
     print("Example: WEBHOOK_URL=https://sika-track.onrender.com")
     exit(1)
 
+if not WEBHOOK_SECRET:
+    print("ERROR: Set WEBHOOK_SECRET in your .env file (same value as on Render)")
+    print('Generate one: python -c "import secrets; print(secrets.token_urlsafe(32))"')
+    exit(1)
+
 # The full webhook endpoint — Telegram will POST updates here
 webhook_endpoint = f"{WEBHOOK_URL}/webhook"
 
@@ -43,7 +50,11 @@ webhook_endpoint = f"{WEBHOOK_URL}/webhook"
 print(f"Setting webhook to: {webhook_endpoint}")
 response = requests.get(
     f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-    params={"url": webhook_endpoint},  # Tell Telegram where to send updates
+    params={
+        "url": webhook_endpoint,           # Tell Telegram where to send updates
+        "secret_token": WEBHOOK_SECRET,    # Telegram sends this back on every update
+        "allowed_updates": '["message"]',  # We only handle text messages
+    },
 )
 
 # Show the result

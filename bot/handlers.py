@@ -5,7 +5,7 @@ Supports: sales, expenses, flexible summaries, undo, full data deletion,
 listing recent transactions, removing or editing one by its position in that
 list, profit checks, and category spending queries.
 """
-from datetime import date, datetime  # date.today() for running totals; datetime for formatting
+from datetime import date, datetime, timezone  # Running totals, formatting, prompt expiry
 
 from bot.parser import parse_message  # Understands what the user typed
 from bot.database import (  # DB operations
@@ -22,6 +22,7 @@ from bot.database import (  # DB operations
     delete_all_user_data,           # Wipe all user data for privacy/delete command
     set_pending_action,             # Queue a remove/edit pending the user's "yes" reply
     pop_pending_action,             # Atomically read+delete the pending action
+    set_daily_summary,              # Evening summary on/off
 )
 from bot.formatter import (  # Pretty output
     format_summary,                 # Daily/weekly/range summary
@@ -102,6 +103,46 @@ def _format_profit_reply(period_label, totals):
     return f"💰 {period_label}'s profit: GHS {profit:.2f}"  # Profit (or zero) state
 
 
+AMOUNT_PROMPT_MINUTES = 10  # How long a ➕ Sale / ➖ Expense tap waits for the amount
+
+
+def _pending_age_minutes(created_at):
+    """Minutes since a pending action was saved (SQLite: naive UTC string; PG: aware datetime)."""
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at)
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created_at).total_seconds() / 60
+
+
+def _record(chat_id, txn_type, amount, category):
+    """Save a sale/expense and build the confirmation with today's running totals."""
+    created_at = add_transaction(chat_id, txn_type, amount, category)  # Returns DB timestamp
+    when = _format_datetime(created_at)  # 'Wed, Apr 16 at 2:35 PM'
+    running = _today_running_total_line(chat_id)  # Today's running totals (post-insert)
+    label = "Sale" if txn_type == "sale" else "Expense"
+    return (
+        f"✅ {label} recorded: GHS {amount:.2f} — {category} ({when})\n"  # Confirmation line
+        f"{running}"  # Running daily total beneath
+    )
+
+
+def build_daily_summary(chat_id, day):
+    """Evening wrap-up message for one user, or None if they logged nothing that day."""
+    totals = get_period_totals(chat_id, day, day)
+    if totals["count"] == 0:
+        return None
+    profit = totals["sales"] - totals["expenses"]
+    bottom = f"💰 Profit: GHS {profit:.2f}" if profit >= 0 else f"📉 Loss: GHS {abs(profit):.2f}"
+    return (
+        "🌙 Today's wrap-up\n"
+        f"Sales: GHS {totals['sales']:.2f}\n"
+        f"Expenses: GHS {totals['expenses']:.2f}\n"
+        f"{bottom}\n\n"
+        "Send 'summary off' to stop these."
+    )
+
+
 def handle_message(chat_id, first_name, text):
     """Process one message and return a reply string.
 
@@ -122,29 +163,37 @@ def handle_message(chat_id, first_name, text):
     if intent == "help":
         return HELP_TEXT  # All available commands with examples
 
-    # --- Record a sale ---
-    if intent == "sale":
-        add_transaction(chat_id, "sale", parsed["amount"], parsed["category"])  # Save
-        txn = get_last_transaction(chat_id)  # Re-read for the DB-assigned timestamp
-        when = _format_datetime(txn["created_at"])  # 'Wed, Apr 16 at 2:35 PM'
-        running = _today_running_total_line(chat_id)  # Today's running totals (post-insert)
+    # --- Record a sale or an expense ---
+    if intent in ("sale", "expense"):
+        return _record(chat_id, intent, parsed["amount"], parsed["category"])
+
+    # --- ➕ Sale / ➖ Expense buttons: remember the tap, ask for the amount ---
+    if intent in ("sale_prompt", "expense_prompt"):
+        action = "await_sale" if intent == "sale_prompt" else "await_expense"
+        set_pending_action(chat_id, action, 0)  # txn_id unused for these
+        what = "sell" if intent == "sale_prompt" else "spend"
+        return f"How much did you {what}? Type the amount and item, e.g. 50 kenkey"
+
+    # --- Bare amount ("50 kenkey"): completes a ➕ Sale / ➖ Expense tap ---
+    if intent == "bare_amount":
+        pending = pop_pending_action(chat_id)
+        if (pending is not None and pending["action"] in ("await_sale", "await_expense")
+                and _pending_age_minutes(pending["created_at"]) <= AMOUNT_PROMPT_MINUTES):
+            txn_type = "sale" if pending["action"] == "await_sale" else "expense"
+            return _record(chat_id, txn_type, parsed["amount"], parsed["category"])
+        amount = f"{parsed['amount']:g}"
         return (
-            f"✅ Sale recorded: GHS {parsed['amount']:.2f} — {parsed['category']} "
-            f"({when})\n"  # Confirmation line
-            f"{running}"  # Running daily total beneath
+            f"Is {amount} a sale or an expense?\n"
+            f"Send 'sold {amount}' or 'spent {amount}', or tap ➕ Sale / ➖ Expense first."
         )
 
-    # --- Record an expense ---
-    if intent == "expense":
-        add_transaction(chat_id, "expense", parsed["amount"], parsed["category"])  # Save
-        txn = get_last_transaction(chat_id)  # Re-read for the timestamp
-        when = _format_datetime(txn["created_at"])  # Format for display
-        running = _today_running_total_line(chat_id)  # Today's running totals (post-insert)
-        return (
-            f"✅ Expense recorded: GHS {parsed['amount']:.2f} — {parsed['category']} "
-            f"({when})\n"  # Confirmation line
-            f"{running}"  # Running daily total beneath
-        )
+    # --- Evening summary on/off ---
+    if intent == "daily_summary_off":
+        set_daily_summary(chat_id, False)
+        return "🔕 Evening summary turned off. Send 'summary on' to get it back."
+    if intent == "daily_summary_on":
+        set_daily_summary(chat_id, True)
+        return "🔔 Evening summary turned on. You'll get a wrap-up on days you log something."
 
     # --- Flexible date summary (today, yesterday, week, month, day names, specific dates) ---
     if intent == "summary":
@@ -225,7 +274,7 @@ def handle_message(chat_id, first_name, text):
     # --- Confirm: dispatch the pending action queued by "remove N" or "edit N to X" ---
     if intent == "remove_confirm":
         pending = pop_pending_action(chat_id)  # Atomic read+delete, durable across workers
-        if pending is None:  # User said 'yes' without staging anything first
+        if pending is None or pending["action"] not in ("remove", "edit"):  # Nothing staged
             return "Nothing to confirm. Send 'list' to see your recent transactions."
         row = get_transaction_by_id(pending["txn_id"])  # Re-read so we can report details
         if not row:  # Row vanished between preview and confirm (e.g. concurrent undo)
@@ -264,4 +313,4 @@ def handle_message(chat_id, first_name, text):
         return format_category_summary(rows, parsed["category"], parsed["label"])
 
     # --- Unknown: nothing matched ---
-    return "❓ I didn't understand that. Send 'help' to see what I can do."
+    return "❓ I didn't understand that. Tap 📖 Help or send 'help' to see what I can do."

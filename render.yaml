@@ -34,6 +34,15 @@ services:
       - key: WEBHOOK_URL
         sync: false                    # Set manually after first deploy
 
+      # Random secret Telegram sends with every update — blocks fake requests.
+      # Must match the value used when running setup_webhook.py
+      - key: WEBHOOK_SECRET
+        sync: false
+
+      # Random secret for the /cron/daily-summary trigger URL
+      - key: CRON_SECRET
+        sync: false
+
       # PostgreSQL connection string from Supabase (free tier)
       # Format: postgresql://user:password@host:port/database
       - key: DATABASE_URL

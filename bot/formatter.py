@@ -7,22 +7,25 @@ START_TEXT = (
     "🔒 Your data is private. Only you can see your records. "  # Privacy notice
     "We don't share your information with anyone. "  # Data policy
     "Send 'delete' to erase all your data at any time.\n\n"  # Deletion option
-    "Tap the ☰ Menu button beside the message box, "  # Point to menu button
-    "or send 'help' to see all available commands."  # Point to help
+    "Use the buttons below to log a sale or expense in one tap, "  # Quick buttons
+    "or tap ☰ Menu / send 'help' to see all commands."  # Point to menu + help
 )
 
 # Full command reference — shown when user sends /help or "help"
 HELP_TEXT = (
     "📖 Sika Track — Commands\n\n"  # Header
+    "⚡ Quick buttons: tap ➕ Sale or ➖ Expense,\n"  # One-tap logging
+    "  then type the amount, e.g. 50 kenkey\n\n"  # Second step
     "💰 Record a sale:\n"  # Sales section
     "  sold 50\n"  # Example: basic sale
     "  made 200 kenkey\n"  # Example: sale with category
-    "  Keywords: sold, sale, income, received,\n"  # All sale trigger words
-    "  got, earn, made\n\n"  # (continued)
+    "  Keywords: sold, sell, sale, income,\n"  # All sale trigger words
+    "  received, got, earn, made\n\n"  # (continued)
     "💸 Record an expense:\n"  # Expenses section
     "  spent 30 gas\n"  # Example: expense with category
     "  paid 100 electricity\n"  # Example: paid keyword
-    "  Keywords: spent, expense, paid, bought, cost\n\n"  # All expense triggers
+    "  Keywords: spent, spend, sent, expense,\n"  # All expense triggers
+    "  paid, pay, bought, buy, cost\n\n"  # (continued)
     "📊 View summaries:\n"  # Summaries section
     "  today — today's summary\n"  # Daily summary
     "  yesterday — yesterday\n"  # Yesterday shortcut
@@ -55,6 +58,9 @@ HELP_TEXT = (
     "  Also: recent, transactions (same as list)\n"  # Aliases for the list command
     "  Also: delete 1 / change 1 to 500\n"  # Alias for remove + edit
     "  Then send 'yes' to confirm\n\n"  # Confirmation step
+    "🌙 Evening summary:\n"  # Automatic nightly wrap-up
+    "  Sent each evening on days you log something\n"  # When it arrives
+    "  summary off / summary on — stop or restart it\n\n"  # Opt-out toggle
     "🗑️ Delete all data:\n"  # Deletion section
     "  delete — erase everything"  # Data wipe command
 )

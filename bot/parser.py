@@ -11,6 +11,8 @@ Supports:
 import re  # Regular expressions for pattern matching
 from datetime import date, timedelta  # Date math for flexible summaries
 
+from bot.menu import BUTTON_ACTIONS  # Quick-button label → command text
+
 
 # Day name → weekday number (Monday=0, Sunday=6) — for "monday", "tuesday" etc.
 DAYS = {
@@ -25,6 +27,12 @@ MONTHS = {
     "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9,
     "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
 }
+
+
+def _clean_category(raw):
+    """'on waakye' → 'waakye', '' → 'general' — so categories group together."""
+    category = re.sub(r"^(?:on|for|of)\s+", "", raw.strip())  # Drop a leading filler word
+    return category or "general"
 
 
 def _fmt(d):
@@ -94,7 +102,22 @@ def parse_message(text):
       {"intent": "delete_confirm"}
       {"intent": "unknown"}
     """
+    text = BUTTON_ACTIONS.get(text.strip(), text)  # Quick-button tap → its command text
     text = text.strip().lower()  # Normalize: remove whitespace, lowercase
+    if text.startswith("/"):  # "/today" or "/today@SikaTrackBot" typed as text
+        text = text[1:].split("@")[0]
+
+    # --- Quick buttons that ask for an amount next ---
+    if text == "sale prompt":  # ➕ Sale button
+        return {"intent": "sale_prompt"}
+    if text == "expense prompt":  # ➖ Expense button
+        return {"intent": "expense_prompt"}
+
+    # --- Evening summary on/off — before 'summary' so it isn't read as a report ---
+    if text in ("summary off", "stop summary", "stop summaries"):
+        return {"intent": "daily_summary_off"}
+    if text in ("summary on", "start summary", "start summaries"):
+        return {"intent": "daily_summary_on"}
 
     # --- Confirmation intents — checked first to avoid collisions with other keywords ---
     if text == "yes delete":  # Confirms full data deletion (wipe-all)
@@ -263,27 +286,37 @@ def parse_message(text):
     # --- Sale keywords: sold, sale, income, received, got, earn/earned, made ---
     # Matches: "sold 50", "made 200 kenkey", "income 1000 consulting", etc.
     sale = re.match(
-        r"(?:sold?|sale|income|received|got|earn(?:ed)?|made)\s+(\d+\.?\d*)\s*(.*)",
+        r"(?:sold?|sells?|selling|sale|income|received|got|earn(?:ed)?|made)\s+(\d+\.?\d*)\s*(.*)",
         text,
     )  # Keyword + amount + optional category
     if sale:
         return {
             "intent": "sale",
             "amount": float(sale.group(1)),  # The numeric amount
-            "category": sale.group(2).strip() or "general",  # Category or default
+            "category": _clean_category(sale.group(2)),  # Category or default
         }
 
     # --- Expense keywords: spent, expense, paid, bought, cost ---
     # Matches: "spent 30 gas", "paid 100 electricity", "bought 50 supplies", etc.
     expense = re.match(
-        r"(?:spent|expense|paid|bought|cost)\s+(\d+\.?\d*)\s*(.*)",
+        r"(?:spent|spend(?:s|ing)?|sent|expense|paid|pay|bought|buy|cost)\s+(\d+\.?\d*)\s*(.*)",
         text,
     )  # Keyword + amount + optional category
     if expense:
         return {
             "intent": "expense",
             "amount": float(expense.group(1)),  # The numeric amount
-            "category": expense.group(2).strip() or "general",  # Category or default
+            "category": _clean_category(expense.group(2)),  # Category or default
+        }
+
+    # --- Bare amount: "50 kenkey" — used after tapping ➕ Sale / ➖ Expense ---
+    # Checked after summaries so "3 days" and "5 april" still work.
+    bare = re.match(r"^(\d+\.?\d*)\s*(.*)$", text)
+    if bare:
+        return {
+            "intent": "bare_amount",
+            "amount": float(bare.group(1)),
+            "category": _clean_category(bare.group(2)),
         }
 
     # --- Category spending queries: "food this month", "how much kenkey this week" ---
