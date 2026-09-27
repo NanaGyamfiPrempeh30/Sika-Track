@@ -7,7 +7,8 @@ START_TEXT = (
     "🔒 Your data is private. Only you can see your records. "  # Privacy notice
     "We don't share your information with anyone. "  # Data policy
     "Send 'delete' to erase all your data at any time.\n\n"  # Deletion option
-    "Send 'help' to see all available commands."  # Point to help
+    "Tap the ☰ Menu button beside the message box, "  # Point to menu button
+    "or send 'help' to see all available commands."  # Point to help
 )
 
 # Full command reference — shown when user sends /help or "help"
