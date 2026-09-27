@@ -97,6 +97,11 @@ def _format_profit_reply(period_label, totals):
         # Spec gives 'today yet' wording; mirror that for other periods too
         word = period_label.lower()  # 'today', 'yesterday', 'this week', 'this month'
         return f"💰 No transactions {word} yet."
+    if totals["sales"] == 0:  # Expenses only — likely forgotten sales, not a real loss
+        return (
+            f"🤔 No sales logged {period_label.lower()}, so no profit to show.\n"
+            f"Expenses: GHS {totals['expenses']:.2f}. Made any sales? Tap ➕ Sale to add them."
+        )
     profit = totals["sales"] - totals["expenses"]  # Net for the window
     if profit < 0:  # Loss state — different emoji and label
         return f"📉 {period_label}'s loss: GHS {abs(profit):.2f}"
@@ -132,14 +137,25 @@ def build_daily_summary(chat_id, day):
     totals = get_period_totals(chat_id, day, day)
     if totals["count"] == 0:
         return None
+    footer = "\n\nSend 'summary off' to stop these."
+    if totals["sales"] == 0:
+        # Only expenses logged — most likely sales were forgotten, not a real loss.
+        # Nudge them to log sales instead of reporting a discouraging "loss".
+        return (
+            "🌙 Today's wrap-up\n"
+            f"Expenses: GHS {totals['expenses']:.2f}\n\n"
+            "🤔 No sales logged today. Made any?\n"
+            "Tap ➕ Sale to add them before you forget."
+            + footer
+        )
     profit = totals["sales"] - totals["expenses"]
     bottom = f"💰 Profit: GHS {profit:.2f}" if profit >= 0 else f"📉 Loss: GHS {abs(profit):.2f}"
     return (
         "🌙 Today's wrap-up\n"
         f"Sales: GHS {totals['sales']:.2f}\n"
         f"Expenses: GHS {totals['expenses']:.2f}\n"
-        f"{bottom}\n\n"
-        "Send 'summary off' to stop these."
+        f"{bottom}"
+        + footer
     )
 
 

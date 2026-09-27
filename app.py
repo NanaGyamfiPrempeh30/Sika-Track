@@ -56,8 +56,8 @@ load_dotenv()  # Read .env file and set environment variables
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")       # Bot token from @BotFather
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")         # Set only in production (e.g., https://sika-track.onrender.com)
 PORT = int(os.getenv("PORT", "8000"))          # Render sets PORT automatically; default 8000 for local
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")   # Proves a webhook call really came from Telegram
-CRON_SECRET = os.getenv("CRON_SECRET")         # Protects the evening-summary trigger URL
+WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()  # Proves a webhook call came from Telegram
+CRON_SECRET = (os.getenv("CRON_SECRET") or "").strip()        # Protects the evening-summary trigger URL
 
 # Set up logging so we can see what's happening
 logging.basicConfig(

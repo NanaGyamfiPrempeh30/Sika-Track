@@ -89,6 +89,9 @@ def format_summary(rows, label):
     profit = total_sales - total_expenses  # Calculate profit (or loss)
     emoji = "📈" if profit >= 0 else "📉"  # Up arrow for profit, down for loss
     profit_label = "Profit" if profit >= 0 else "Loss"  # Word label for bottom line
+    bottom_line = f"{emoji} {profit_label}: GHS {abs(profit):.2f}"  # Profit or loss
+    if total_sales == 0:  # Expenses only — sales were likely forgotten, not a real loss
+        bottom_line = "🤔 No sales logged, so no profit to show.\nMade any? Tap ➕ Sale to add them."
 
     # Build the summary message with date range header
     return (
@@ -96,7 +99,7 @@ def format_summary(rows, label):
         f"📅 {label}\n\n"  # Date range on its own line
         f"💰 Sales: GHS {total_sales:.2f}\n"  # Total sales
         f"💸 Expenses: GHS {total_expenses:.2f}\n"  # Total expenses
-        f"{emoji} {profit_label}: GHS {abs(profit):.2f}"  # Profit or loss
+        f"{bottom_line}"  # Profit, loss, or a nudge to log sales
     )
 
 
