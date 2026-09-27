@@ -25,8 +25,8 @@ from dotenv import load_dotenv  # Load .env file
 load_dotenv()  # Read .env file
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Your bot token
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # Your Render URL (e.g., https://sika-track.onrender.com)
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")  # Must match WEBHOOK_SECRET on Render
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").strip().rstrip("/")  # e.g. https://sika-track.onrender.com
+WEBHOOK_SECRET = (os.getenv("WEBHOOK_SECRET") or "").strip()  # Must match WEBHOOK_SECRET on Render
 
 if not TOKEN:
     print("ERROR: Set TELEGRAM_BOT_TOKEN in your .env file")
@@ -65,6 +65,8 @@ if result.get("ok"):
 else:
     print(f"ERROR: {result}")
     print("Check your token and webhook URL.")
+
+print("\nTip: run 'python check_webhook.py' after sending the bot a message to confirm it works.")
 
 # Register the Menu button commands — the ☰ button beside the message box
 # Docs: https://core.telegram.org/bots/api#setmycommands
