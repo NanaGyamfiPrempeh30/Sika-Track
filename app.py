@@ -26,7 +26,7 @@ import logging  # Print helpful debug info to the terminal
 import asyncio  # For running async code in webhook mode
 
 from dotenv import load_dotenv  # Load .env file into os.environ
-from telegram import Update     # Represents an incoming Telegram update
+from telegram import Update, BotCommand  # Incoming update + menu command entries
 from telegram.ext import (      # Tools for building the bot
     ApplicationBuilder,         # Creates the bot application
     MessageHandler,             # Handles text messages
@@ -85,17 +85,54 @@ async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
 
 
+# ---------------------------------------------------------------------------
+# Menu button — the "Menu" / "/" button beside the message box in Telegram
+# ---------------------------------------------------------------------------
+# Each entry becomes a tappable command, so users don't have to type "help".
+# Order here = order shown in the menu. "delete" (wipe all data) is left out
+# on purpose so nobody taps it by accident.
+MENU_COMMANDS = [
+    ("help", "📖 How to use Sika Track"),
+    ("today", "📊 Today's summary"),
+    ("profit", "💰 Today's profit or loss"),
+    ("week", "📅 Last 7 days summary"),
+    ("month", "🗓️ This month so far"),
+    ("list", "📋 Last 10 transactions"),
+    ("undo", "↩️ Remove last entry"),
+    ("start", "👋 Welcome & privacy info"),
+]
+
+
+async def on_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle menu taps like /today — runs the same logic as typing 'today'."""
+    chat_id = update.message.chat.id
+    first_name = update.message.chat.first_name or ""
+    command = update.message.text.split()[0].lstrip("/").split("@")[0].lower()  # "/today@Bot" → "today"
+    logger.info("/%s from %s (id=%d)", command, first_name, chat_id)
+    reply = handle_message(chat_id, first_name, command)  # Reuse the text-keyword flow
+    await update.message.reply_text(reply)
+
+
+async def register_menu(app):
+    """Tell Telegram which commands to show in the chat's menu button."""
+    await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in MENU_COMMANDS])
+    logger.info("Menu commands registered with Telegram")
+
+
 def build_app():
     """Create and configure the Telegram bot application.
 
     This is shared between polling and webhook modes — both need the same
     handlers registered.
     """
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(register_menu).build()  # post_init runs in polling mode
 
     # Register handlers — order matters, commands checked first
     app.add_handler(CommandHandler("start", on_start))   # Handle /start — welcome + privacy
     app.add_handler(CommandHandler("help", on_help))     # Handle /help — command reference
+    app.add_handler(CommandHandler(                      # Handle other menu taps (/today, /list, ...)
+        [name for name, _ in MENU_COMMANDS if name not in ("start", "help")], on_menu_command
+    ))
     app.add_handler(MessageHandler(                      # Handle all other text
         filters.TEXT & ~filters.COMMAND, on_message
     ))
@@ -140,6 +177,10 @@ if WEBHOOK_URL:
             # We do this lazily because gunicorn workers each need their own instance
             telegram_app = build_app()
             asyncio.get_event_loop().run_until_complete(telegram_app.initialize())
+            try:  # post_init only fires in polling mode, so register the menu here
+                asyncio.get_event_loop().run_until_complete(register_menu(telegram_app))
+            except Exception:  # Menu is nice-to-have — never block message handling
+                logger.exception("Failed to register menu commands")
             logger.info("Telegram app initialized for webhook mode")
 
         # Parse the incoming JSON into a Telegram Update object
