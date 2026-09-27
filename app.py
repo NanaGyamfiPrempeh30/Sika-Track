@@ -26,7 +26,7 @@ import logging  # Print helpful debug info to the terminal
 import asyncio  # For running async code in webhook mode
 
 from dotenv import load_dotenv  # Load .env file into os.environ
-from telegram import Update, BotCommand  # Incoming update + menu command entries
+from telegram import Update, BotCommand, MenuButtonCommands  # Update + menu button pieces
 from telegram.ext import (      # Tools for building the bot
     ApplicationBuilder,         # Creates the bot application
     MessageHandler,             # Handles text messages
@@ -35,6 +35,7 @@ from telegram.ext import (      # Tools for building the bot
     filters,                    # Filters to match specific message types
 )
 from bot.handlers import handle_message  # Our message processing logic
+from bot.menu import MENU_COMMANDS  # Commands shown in the Menu button
 
 load_dotenv()  # Read .env file and set environment variables
 
@@ -89,18 +90,7 @@ async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Menu button — the "Menu" / "/" button beside the message box in Telegram
 # ---------------------------------------------------------------------------
 # Each entry becomes a tappable command, so users don't have to type "help".
-# Order here = order shown in the menu. "delete" (wipe all data) is left out
-# on purpose so nobody taps it by accident.
-MENU_COMMANDS = [
-    ("help", "📖 How to use Sika Track"),
-    ("today", "📊 Today's summary"),
-    ("profit", "💰 Today's profit or loss"),
-    ("week", "📅 Last 7 days summary"),
-    ("month", "🗓️ This month so far"),
-    ("list", "📋 Last 10 transactions"),
-    ("undo", "↩️ Remove last entry"),
-    ("start", "👋 Welcome & privacy info"),
-]
+# The list lives in bot/menu.py so setup_webhook.py can register it too.
 
 
 async def on_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,6 +106,7 @@ async def on_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def register_menu(app):
     """Tell Telegram which commands to show in the chat's menu button."""
     await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in MENU_COMMANDS])
+    await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())  # Force ☰ to show commands
     logger.info("Menu commands registered with Telegram")
 
 

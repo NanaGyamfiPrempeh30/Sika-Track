@@ -8,6 +8,8 @@ What this does:
     After this, Telegram will POST every message to your Render server instead of
     requiring the bot to poll for updates.
 
+It also registers the Menu button commands (the ☰ button beside the message box).
+
 You only need to run this once. Run it again if you change your Render URL.
 
 Requirements:
@@ -16,6 +18,7 @@ Requirements:
 """
 import os
 import requests  # HTTP client to call the Telegram API
+from bot.menu import MENU_COMMANDS  # Commands for the Menu button
 from dotenv import load_dotenv  # Load .env file
 
 load_dotenv()  # Read .env file
@@ -51,3 +54,15 @@ if result.get("ok"):
 else:
     print(f"ERROR: {result}")
     print("Check your token and webhook URL.")
+
+# Register the Menu button commands — the ☰ button beside the message box
+# Docs: https://core.telegram.org/bots/api#setmycommands
+commands = [{"command": name, "description": desc} for name, desc in MENU_COMMANDS]
+menu = requests.post(f"https://api.telegram.org/bot{TOKEN}/setMyCommands", json={"commands": commands}).json()
+button = requests.post(  # Make the ☰ button open the command list
+    f"https://api.telegram.org/bot{TOKEN}/setChatMenuButton", json={"menu_button": {"type": "commands"}}
+).json()
+if menu.get("ok") and button.get("ok"):
+    print(f"Menu button set with {len(commands)} commands!")
+else:
+    print(f"ERROR setting menu: {menu} {button}")
