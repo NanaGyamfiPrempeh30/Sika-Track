@@ -17,3 +17,8 @@ venv/
 
 # Claude Code settings
 .claude/
+
+# Database backups (encrypted or not) must never be committed
+*.gpg
+*.sql
+*.sql.gz
