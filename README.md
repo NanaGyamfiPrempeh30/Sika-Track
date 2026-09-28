@@ -76,6 +76,35 @@ Create two jobs at [cron-job.org](https://cron-job.org):
 The summary only goes to users who logged something that day. Users can send
 `summary off` to stop it.
 
+## Backups
+
+A GitHub Action (`.github/workflows/backup.yml`) backs up the database every
+Sunday at 02:17 UTC. Backups are **encrypted**, because this repo is public and
+anyone signed in to GitHub can download its workflow files. The last ~13 weekly
+backups are kept (90 days).
+
+**Setup (once):** GitHub repo → Settings → Secrets and variables → Actions → New repository secret:
+
+| Secret | Value |
+|--------|-------|
+| `BACKUP_DATABASE_URL` | Supabase → Connect → **Session pooler** connection string (with your DB password filled in) |
+| `BACKUP_PASSPHRASE` | A long random password (16+ characters). **Save it in a password manager — without it the backups can't be opened.** |
+
+Then open the Actions tab → "Weekly database backup" → **Run workflow** to test it.
+A green tick = working. If it fails, GitHub emails you.
+
+**Restore:**
+1. Actions tab → latest successful run → download the backup under "Artifacts" and unzip it
+2. Decrypt (Git Bash on Windows has `gpg`):
+   ```bash
+   gpg -d sika-track-YYYY-MM-DD.sql.gz.gpg | gunzip > backup.sql   # asks for BACKUP_PASSPHRASE
+   ```
+3. Open `backup.sql`, copy everything, and run it in Supabase → SQL Editor
+   (restore into a fresh, empty project). Ignore a `schema "public" already exists` error.
+
+**Heads-up:** GitHub pauses scheduled workflows after 60 days with no commits to
+the repo, and emails you first. Click "Enable workflow" in the Actions tab to resume.
+
 ## Usage
 
 Send these messages to your bot on Telegram:
